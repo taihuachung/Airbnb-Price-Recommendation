@@ -1,0 +1,207 @@
+---
+title: "Airbnb Price Recommendation Model"
+author: "Tai-Hua C. , Olivia N. , Randy S. , Jared S. , Dan T."
+date: "3/13/2019"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#==========================================================
+## SET UP 
+#==========================================================
+```{r set up}
+
+# clear workspace
+rm(list = ls())
+
+# library
+library(data.table)
+library(ggplot2)
+library(stargazer)
+library(VIF)
+library(lfe)
+
+
+```
+
+#==========================================================
+## LOAD, EXPLORE AND CLEAN DATA
+#==========================================================
+```{r library}
+
+#SF = fread("listings_SF.csv")
+#LA = fread("listings_LA.csv")
+#NY = fread("listings_NY.csv")
+#SEA = fread("listings_SEA.csv")
+
+
+data = fread("Full Dataset Merged.csv") # 170882
+data = fread("Cleaned Full Dataset Merged.csv") # 166207
+data = fread("all cities with dums.csv")
+
+head(data)
+nrow(data)
+
+
+#Make boolean
+data$estimated_occupancy_per_month <- (data$reviews_per_month * 2)
+data[data=='f'] <- 0
+data[data=='t'] <- 1
+head(data)
+
+sum(is.na(data$price))
+
+
+```
+
+
+#==========================================================
+## OLS Model: manual specification
+#==========================================================
+
+
+#==========================================================
+## Machine Learning Model
+#==========================================================
+```{r}
+install.packages('caret')
+install.packages('mlbench')
+install.packages('munsell')
+install.packages('ranger')
+install.packages('glmnet')
+install.packages('bit64')
+install.packages('dummies')
+install.packages('fastDummies')
+install.packages('gower')
+install.packages('lattice')
+install.packages('ggplot2')
+install.packages('lava')
+install.packages('caret', dependencies = TRUE)
+install.packages('gower', dependencies = TRUE)
+library(gower)
+library(ggplot2)
+library(lattice)
+library(lava)
+library(data.table)
+library(ranger)
+library(caret)
+library(mlbench)
+library(munsell)
+library(glmnet)
+library(bit64)
+library(dummies)
+library(fastDummies)
+control <- trainControl(method='repeatedcv', number=10, repeats=3)
+metric <- 'RMSE'
+
+#Numeric cols only 
+
+#get.dummy( data, 'city' )
+#data
+#d = dummy_cols(data$city)
+
+
+#manually combine dataset with city dums
+#write.csv(d,"C:/Users/Jsins/Documents/Marketing Analytics/citydum.csv", row.names = FALSE)
+#write.csv(data,"C:/Users/Jsins/Documents/Marketing Analytics/cities.csv", row.names = FALSE)
+
+data = fread("all cities with dums.csv")
+
+mldata <- unlist(lapply(data, is.numeric))  
+
+numerics = data[ , ..mldata]
+
+numerics
+
+#drop these
+drops <- c("Wifi","Beach","host_id","id","zipcode","V1", "square_feet","security_deposit","square_feet","cleaning_fee","security_deposit","host_response_rate")
+
+#create subset
+sub <- numerics[ , !(names(numerics) %in% drops)]
+sub
+
+
+cleaned = numerics[,..sub]
+cleaned
+
+cleaned = na.exclude(cleaned)
+
+
+
+set.seed(101)
+sample <- createDataPartition(cleaned$price, p=0.80, list = FALSE)
+train <- cleaned[sample,]
+test <- cleaned[-sample,]
+
+
+
+#KNN - not sure if we'll do this...
+## Don't run, it takes 
+
+#fit.knn <- train(price~., data=train, method='knn', metric=metric, 
+#                    preProc=c('center', 'scale'), trControl=control)
+
+#fit.knn
+
+
+#valid_pred <- predict(fit.knn,test)
+#train_pred <- predict(fit.knn,train)
+
+
+#train
+
+#mean(valid_pred - test$price)
+#mean(train_pred - train$price)
+
+nrow(crm_DT)
+#Random Forrest
+
+crm_DT = cleaned[runif(.N)<.05]
+
+crm_DT = cleaned
+crm_DT[, training_sample:= rbinom(nrow(crm_DT), 1, 0.5)]
+fit_rf =ranger(price~.-training_sample,data = crm_DT[training_sample==1],num.trees = 1000,seed = 204)
+
+#OLS
+fit_OLS =lm(price~.-training_sample,data = crm_DT[training_sample==1])
+summary_OLS =summary(fit_OLS)
+results =data.table(input   =rownames(summary_OLS$coefficients),est_OLS = summary_OLS$coefficients[, 1],p_OLS   = summary_OLS$coefficients[, 4])
+
+#LASSO
+X =model.matrix(price~0+.-training_sample,data = crm_DT[training_sample==1])
+y = crm_DT[training_sample==1, price]
+fit_LASSO =cv.glmnet(x = X, y = y, alpha = 1.0)
+results[, est_LASSO:= coef(fit_LASSO, s = "lambda.min")[,1]]
+
+#Results
+table(results, digits = 4)
+
+#Model Validation
+predict_DT = crm_DT[training_sample==0]
+predict_DT[, y_OLS:= predict(fit_OLS, newdata = predict_DT)]
+X_new =model.matrix(price~0+.-training_sample,data = crm_DT[training_sample==0])
+predict_DT[, y_LASSO:= predict(fit_LASSO, newx = X_new, s = "lambda.min")]
+predict_ranger =predict(fit_rf, data = predict_DT)
+predict_DT[, y_rf:=predict_ranger$predictions]
+
+
+#Mean-squared errors
+mse_OLS =mean((predict_DT$y_OLS-predict_DT$price)^2)
+mse_LASSO =mean((predict_DT$y_LASSO-predict_DT$price)^2)
+mse_rf    =mean((predict_DT$y_rf-predict_DT$price)^2)
+cat(mse_OLS, mse_LASSO, mse_rf, "\n")
+
+ggplot(predict_DT[price>0],aes(x = y_OLS, y = price))+geom_point(shape = 21, color = "gray30", fill = "hotpink",size = 2, stroke = 0.5, alpha = 0.25)+geom_smooth(method=lm, color = "purple")+theme_bw()
+
+ggplot(predict_DT[price>0],aes(x = y_LASSO, y = price))+geom_point(shape = 21, color = "gray30", fill = "hotpink",size = 2, stroke = 0.5, alpha = 0.25)+geom_smooth(method=lm, color = "purple")+theme_bw()
+
+
+ggplot(predict_DT[price>0],aes(x = y_rf, y = price))+geom_point(shape = 21, color = "gray30", fill = "hotpink",size = 2, stroke = 0.5, alpha = 0.25)+geom_smooth(method=lm, color = "purple")+theme_bw()
+
+mse_decomp =mean((predict_DT$y_decomp-predict_DT$price)^2)
+cat(mse_OLS, mse_LASSO, mse_rf, "\n")
+
+```
